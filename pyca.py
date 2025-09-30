@@ -23,31 +23,70 @@ pd.set_option('display.max_columns', 50)
 if not hasattr(np, "bool8"):
     np.bool8 = np.bool_
 
+# --- Define MANDATORY columns for data validation ---
+# We make these column names mandatory for the primary analysis features to work.
+MANDATORY_COLUMNS = [
+    "Date",
+    "Item Sold",
+    "Quantity Sold",
+    # We require either Total Sale Value or Price per Item to calculate revenue
+]
+# Columns we will try to derive if missing
+REVENUE_COLUMNS = ["Total Sale Value (₹)", "Price per Item (₹)"]
+# ----------------------------------------------------
 
-# --- 1. Core Functions (Copied from Notebook) ---
+
+# --- 1. Core Functions (Updated with Validation) ---
 
 @st.cache_data
 def preprocess_data(df):
-    """Performs the cleaning and preprocessing steps from Section 3."""
-    # Normalize column names (strip)
+    """Performs the cleaning and preprocessing steps from Section 3, including validation."""
+
+    # 1. Normalize column names (strip)
     df.columns = [str(c).strip() for c in df.columns]
+    
+    # Get normalized column names for case-insensitive checking
+    normalized_cols = [c.strip().lower() for c in df.columns]
+
+    # --- 1. VALIDATION CHECK ---
+    
+    # Check for basic mandatory columns
+    for col_name in MANDATORY_COLUMNS:
+        # Check if the mandatory column, or a close match, exists
+        if col_name.strip().lower() not in normalized_cols:
+            st.error(
+                f"**Validation Failed:** Your data is missing the required column: **'{col_name}'**."
+                " Please ensure the column name is present."
+            )
+            return None
+
+    # Check for revenue column necessity
+    has_total_value = 'Total Sale Value (₹)'.strip().lower() in normalized_cols
+    has_price = 'Price per Item (₹)'.strip().lower() in normalized_cols
+    
+    if not has_total_value and not has_price:
+        st.error(
+            "**Validation Failed:** To calculate revenue, your data must contain either **'Total Sale Value (₹)'** "
+            "or **'Price per Item (₹)'** (since 'Quantity Sold' is present)."
+        )
+        return None
+        
+    # --- 2. DATA CLEANING AND PROCESSING (Original Logic) ---
 
     # Ensure Date column is datetime
-    if 'Date' not in df.columns:
-        st.error("Input file must have a 'Date' column.")
-        return None
-    
     df['Date'] = pd.to_datetime(df['Date'], dayfirst=True, errors='coerce')
     if df['Date'].isna().any():
         df['Date'] = pd.to_datetime(df['Date'].astype(str), errors='coerce', dayfirst=True)
+        if df['Date'].isna().any():
+            st.error("Date parsing failed for multiple rows. Please check the format of the 'Date' column.")
+            return None
 
-    # Fill missing Price per Item
+    # Fill missing Price per Item (Logic relies on columns being present from validation)
     if 'Price per Item (₹)' not in df.columns or df['Price per Item (₹)'].isnull().all():
         if 'Total Sale Value (₹)' in df.columns and 'Quantity Sold' in df.columns:
+            # Note: Division by zero will produce infinity or NaN, which fillna(0) below will handle
             df['Price per Item (₹)'] = df['Total Sale Value (₹)'] / df['Quantity Sold']
-        else:
-            # Cannot proceed without price or revenue/qty
-            st.warning("Price per Item column missing and cannot be derived. Some calculations may be inaccurate.")
+        # If both Price and Total Sale were missing, validation already caught it.
             
     # Ensure numeric columns are numeric
     for col in ['Quantity Sold', 'Price per Item (₹)', 'Total Sale Value (₹)']:
@@ -68,9 +107,9 @@ def preprocess_data(df):
     return df
 
 @st.cache_data
+# ... (rest of the run_analysis, compute_reorder_table, forecast functions are unchanged) ...
 def run_analysis(df):
     """Runs all aggregation and analysis steps (Section 4 & 5)."""
-    
     # Daily total revenue and quantity
     daily = df.groupby('Date').agg(
         DailyRevenue=('Total Sale Value (₹)', 'sum'),
@@ -164,10 +203,19 @@ def forecast_prophet(daily_series, periods=14):
     return fc[['Date', 'Forecast']]
 
 
-# --- 2. Streamlit App Layout ---
+# --- 2. Streamlit App Layout (Updated with Guide) ---
 
 st.title("🛒 Sales & Inventory Analytics App")
 st.markdown("Upload your transactional Excel file to generate a full analysis, forecasts, and reorder suggestions.")
+
+# --- USER GUIDE & VALIDATION INSTRUCTIONS ---
+st.subheader("📝 Data Requirements")
+st.info(
+    "Your uploaded Excel file **must** contain the following columns (case and spelling are lenient, but structure matters): "
+    f"**{', '.join(MANDATORY_COLUMNS)}**"
+    "\n\nAdditionally, you must provide either **'Total Sale Value (₹)'** OR **'Price per Item (₹)'**."
+)
+# --- END USER GUIDE ---
 
 # File Uploader (Section 2)
 uploaded_file = st.sidebar.file_uploader("Upload your Excel Sales Data", type=['xlsx'])
@@ -176,9 +224,10 @@ if uploaded_file is not None:
     # Read the file
     try:
         df_raw = pd.read_excel(uploaded_file)
+        # Pass the raw DataFrame to the validation/preprocessing function
         df = preprocess_data(df_raw.copy())
     except Exception as e:
-        st.error(f"Error processing file: {e}")
+        st.error(f"Error reading or processing file: {e}")
         st.stop()
 
     if df is not None and not df.empty:
@@ -193,7 +242,6 @@ if uploaded_file is not None:
             service_level_pct = st.slider("Service Level (%)", 70, 99, 90)
             
             # Convert Service Level to Z-score
-            # 70% -> 0.52, 80% -> 0.84, 90% -> 1.28, 95% -> 1.64, 99% -> 2.33
             z_score_map = {70: 0.52, 80: 0.84, 90: 1.28, 95: 1.64, 99: 2.33}
             z_value = z_score_map.get(service_level_pct, 1.28)
             st.caption(f"Z-Value used for safety stock: **{z_value}**")
