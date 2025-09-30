@@ -23,81 +23,31 @@ pd.set_option('display.max_columns', 50)
 if not hasattr(np, "bool8"):
     np.bool8 = np.bool_
 
-# --- Define MANDATORY columns for data validation ---
-MANDATORY_COLUMNS = [
-    "Date",
-    "Item Sold",
-    "Quantity Sold",
-]
-# ----------------------------------------------------
 
-
-# --- 1. Core Functions (Updated with Validation and Date Fix) ---
+# --- 1. Core Functions (Copied from Notebook) ---
 
 @st.cache_data
 def preprocess_data(df):
-    """Performs the cleaning and preprocessing steps from Section 3, including validation."""
-
-    # 1. Normalize column names (strip)
+    """Performs the cleaning and preprocessing steps from Section 3."""
+    # Normalize column names (strip)
     df.columns = [str(c).strip() for c in df.columns]
-    normalized_cols = [c.strip().lower() for c in df.columns]
 
-    # --- 1. VALIDATION CHECK ---
-    
-    # Check for basic mandatory columns
-    for col_name in MANDATORY_COLUMNS:
-        if col_name.strip().lower() not in normalized_cols:
-            st.error(
-                f"**Validation Failed:** Your data is missing the required column: **'{col_name}'**."
-                " Please ensure the column name is present."
-            )
-            return None
-
-    # Check for revenue column necessity
-    has_total_value = 'Total Sale Value (₹)'.strip().lower() in normalized_cols
-    has_price = 'Price per Item (₹)'.strip().lower() in normalized_cols
-    
-    if not has_total_value and not has_price:
-        st.error(
-            "**Validation Failed:** To calculate revenue, your data must contain either **'Total Sale Value (₹)'** "
-            "or **'Price per Item (₹)'** (since 'Quantity Sold' is present)."
-        )
+    # Ensure Date column is datetime
+    if 'Date' not in df.columns:
+        st.error("Input file must have a 'Date' column.")
         return None
-        
-    # --- 2. DATA CLEANING AND PROCESSING ---
-
-    # --- DATE PARSING FIX ---
-    date_col = next((col for col in df.columns if col.strip().lower() == 'date'), None)
     
-    # List of common formats to try explicitly (most common first)
-    date_formats = ['%d-%m-%Y', '%d/%m/%Y', '%m-%d-%Y', '%m/%d/%Y']
-    
-    for fmt in date_formats:
-        try:
-            # Attempt parsing with explicit format
-            df['Date'] = pd.to_datetime(df[date_col], format=fmt, errors='coerce')
-            # Check if parsing was successful for the majority of rows
-            if df['Date'].notna().sum() > (len(df) * 0.9):
-                break # Success, break the loop
-        except ValueError:
-            continue
-    else:
-        # Final attempt with flexible parser (original logic)
-        df['Date'] = pd.to_datetime(df[date_col], dayfirst=True, errors='coerce')
-
-
-    # --- FINAL CHECK FOR NA DATES ---
+    df['Date'] = pd.to_datetime(df['Date'], dayfirst=True, errors='coerce')
     if df['Date'].isna().any():
-        st.error(
-            "Date parsing failed for multiple rows. Please check the 'Date' column format. "
-            "It looks like your data has dates in highly inconsistent formats. The process cannot continue."
-        )
-        return None
+        df['Date'] = pd.to_datetime(df['Date'].astype(str), errors='coerce', dayfirst=True)
 
     # Fill missing Price per Item
     if 'Price per Item (₹)' not in df.columns or df['Price per Item (₹)'].isnull().all():
         if 'Total Sale Value (₹)' in df.columns and 'Quantity Sold' in df.columns:
             df['Price per Item (₹)'] = df['Total Sale Value (₹)'] / df['Quantity Sold']
+        else:
+            # Cannot proceed without price or revenue/qty
+            st.warning("Price per Item column missing and cannot be derived. Some calculations may be inaccurate.")
             
     # Ensure numeric columns are numeric
     for col in ['Quantity Sold', 'Price per Item (₹)', 'Total Sale Value (₹)']:
@@ -214,36 +164,21 @@ def forecast_prophet(daily_series, periods=14):
     return fc[['Date', 'Forecast']]
 
 
-# --- 2. Streamlit App Layout (Updated with Guide) ---
+# --- 2. Streamlit App Layout ---
 
 st.title("🛒 Sales & Inventory Analytics App")
 st.markdown("Upload your transactional Excel file to generate a full analysis, forecasts, and reorder suggestions.")
 
-# --- USER GUIDE & VALIDATION INSTRUCTIONS ---
-st.subheader("📝 Data Requirements")
-st.info(
-    "Your uploaded Excel file **must** contain the following columns (case and spelling are lenient, but structure matters): "
-    f"**{', '.join(MANDATORY_COLUMNS)}**"
-    "\n\nAdditionally, you must provide either **'Total Sale Value (₹)'** OR **'Price per Item (₹)'**."
-)
-# --- END USER GUIDE ---
-
 # File Uploader (Section 2)
-uploaded_file = st.sidebar.file_uploader("Upload your Excel Sales Data", type=['xlsx', 'csv']) # Added CSV support too
+uploaded_file = st.sidebar.file_uploader("Upload your Excel Sales Data", type=['xlsx'])
 
 if uploaded_file is not None:
     # Read the file
     try:
-        # Use filename to infer if it's CSV or Excel
-        if uploaded_file.name.endswith('.csv'):
-             df_raw = pd.read_csv(uploaded_file)
-        else:
-             df_raw = pd.read_excel(uploaded_file)
-             
-        # Pass the raw DataFrame to the validation/preprocessing function
+        df_raw = pd.read_excel(uploaded_file)
         df = preprocess_data(df_raw.copy())
     except Exception as e:
-        st.error(f"Error reading or processing file: {e}")
+        st.error(f"Error processing file: {e}")
         st.stop()
 
     if df is not None and not df.empty:
@@ -258,6 +193,7 @@ if uploaded_file is not None:
             service_level_pct = st.slider("Service Level (%)", 70, 99, 90)
             
             # Convert Service Level to Z-score
+            # 70% -> 0.52, 80% -> 0.84, 90% -> 1.28, 95% -> 1.64, 99% -> 2.33
             z_score_map = {70: 0.52, 80: 0.84, 90: 1.28, 95: 1.64, 99: 2.33}
             z_value = z_score_map.get(service_level_pct, 1.28)
             st.caption(f"Z-Value used for safety stock: **{z_value}**")
