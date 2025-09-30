@@ -24,19 +24,15 @@ if not hasattr(np, "bool8"):
     np.bool8 = np.bool_
 
 # --- Define MANDATORY columns for data validation ---
-# We make these column names mandatory for the primary analysis features to work.
 MANDATORY_COLUMNS = [
     "Date",
     "Item Sold",
     "Quantity Sold",
-    # We require either Total Sale Value or Price per Item to calculate revenue
 ]
-# Columns we will try to derive if missing
-REVENUE_COLUMNS = ["Total Sale Value (₹)", "Price per Item (₹)"]
 # ----------------------------------------------------
 
 
-# --- 1. Core Functions (Updated with Validation) ---
+# --- 1. Core Functions (Updated with Validation and Date Fix) ---
 
 @st.cache_data
 def preprocess_data(df):
@@ -44,15 +40,12 @@ def preprocess_data(df):
 
     # 1. Normalize column names (strip)
     df.columns = [str(c).strip() for c in df.columns]
-    
-    # Get normalized column names for case-insensitive checking
     normalized_cols = [c.strip().lower() for c in df.columns]
 
     # --- 1. VALIDATION CHECK ---
     
     # Check for basic mandatory columns
     for col_name in MANDATORY_COLUMNS:
-        # Check if the mandatory column, or a close match, exists
         if col_name.strip().lower() not in normalized_cols:
             st.error(
                 f"**Validation Failed:** Your data is missing the required column: **'{col_name}'**."
@@ -71,22 +64,40 @@ def preprocess_data(df):
         )
         return None
         
-    # --- 2. DATA CLEANING AND PROCESSING (Original Logic) ---
+    # --- 2. DATA CLEANING AND PROCESSING ---
 
-    # Ensure Date column is datetime
-    df['Date'] = pd.to_datetime(df['Date'], dayfirst=True, errors='coerce')
+    # --- DATE PARSING FIX ---
+    date_col = next((col for col in df.columns if col.strip().lower() == 'date'), None)
+    
+    # List of common formats to try explicitly (most common first)
+    date_formats = ['%d-%m-%Y', '%d/%m/%Y', '%m-%d-%Y', '%m/%d/%Y']
+    
+    for fmt in date_formats:
+        try:
+            # Attempt parsing with explicit format
+            df['Date'] = pd.to_datetime(df[date_col], format=fmt, errors='coerce')
+            # Check if parsing was successful for the majority of rows
+            if df['Date'].notna().sum() > (len(df) * 0.9):
+                break # Success, break the loop
+        except ValueError:
+            continue
+    else:
+        # Final attempt with flexible parser (original logic)
+        df['Date'] = pd.to_datetime(df[date_col], dayfirst=True, errors='coerce')
+
+
+    # --- FINAL CHECK FOR NA DATES ---
     if df['Date'].isna().any():
-        df['Date'] = pd.to_datetime(df['Date'].astype(str), errors='coerce', dayfirst=True)
-        if df['Date'].isna().any():
-            st.error("Date parsing failed for multiple rows. Please check the format of the 'Date' column.")
-            return None
+        st.error(
+            "Date parsing failed for multiple rows. Please check the 'Date' column format. "
+            "It looks like your data has dates in highly inconsistent formats. The process cannot continue."
+        )
+        return None
 
-    # Fill missing Price per Item (Logic relies on columns being present from validation)
+    # Fill missing Price per Item
     if 'Price per Item (₹)' not in df.columns or df['Price per Item (₹)'].isnull().all():
         if 'Total Sale Value (₹)' in df.columns and 'Quantity Sold' in df.columns:
-            # Note: Division by zero will produce infinity or NaN, which fillna(0) below will handle
             df['Price per Item (₹)'] = df['Total Sale Value (₹)'] / df['Quantity Sold']
-        # If both Price and Total Sale were missing, validation already caught it.
             
     # Ensure numeric columns are numeric
     for col in ['Quantity Sold', 'Price per Item (₹)', 'Total Sale Value (₹)']:
@@ -107,9 +118,9 @@ def preprocess_data(df):
     return df
 
 @st.cache_data
-# ... (rest of the run_analysis, compute_reorder_table, forecast functions are unchanged) ...
 def run_analysis(df):
     """Runs all aggregation and analysis steps (Section 4 & 5)."""
+    
     # Daily total revenue and quantity
     daily = df.groupby('Date').agg(
         DailyRevenue=('Total Sale Value (₹)', 'sum'),
@@ -218,12 +229,17 @@ st.info(
 # --- END USER GUIDE ---
 
 # File Uploader (Section 2)
-uploaded_file = st.sidebar.file_uploader("Upload your Excel Sales Data", type=['xlsx'])
+uploaded_file = st.sidebar.file_uploader("Upload your Excel Sales Data", type=['xlsx', 'csv']) # Added CSV support too
 
 if uploaded_file is not None:
     # Read the file
     try:
-        df_raw = pd.read_excel(uploaded_file)
+        # Use filename to infer if it's CSV or Excel
+        if uploaded_file.name.endswith('.csv'):
+             df_raw = pd.read_csv(uploaded_file)
+        else:
+             df_raw = pd.read_excel(uploaded_file)
+             
         # Pass the raw DataFrame to the validation/preprocessing function
         df = preprocess_data(df_raw.copy())
     except Exception as e:
